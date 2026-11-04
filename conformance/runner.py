@@ -237,11 +237,11 @@ def write_baseline(
     path: Path, results: list[CaseResult], baseline: dict[str, str], complete: bool
 ) -> dict[str, str]:
     """
-    Records the failing legs of `results`. Unless the run covered every case (`complete`), the
-    entries of cases that didn't run are kept.
+    Records the failing legs of `results`. Entries of legs that didn't run are kept, unless the run
+    covered every case on every engine (`complete`), in which case they belong to removed cases.
     """
-    ran = {result.case.id for result in results}
-    failures = {} if complete else {k: v for k, v in baseline.items() if k.split(" ")[0] not in ran}
+    ran = {result.key(leg) for result in results for leg in result.legs}
+    failures = {} if complete else {k: v for k, v in baseline.items() if k not in ran}
     for result in results:
         for leg in result.legs:
             if leg.failed:

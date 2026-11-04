@@ -17,6 +17,13 @@ be made to pass by editing it, only by fixing sqlglot.
 The suite runs locally only; it isn't part of CI. It currently covers Postgres 18, Spark 4.2 and
 Vertica 25.3.
 
+## Dialect guides
+
+Dialects that have their own engine have a guide in `dialects/`, covering how to run them, how sqlglot
+models their semantics, what is supported and what is known to be broken:
+
+- [Vertica](dialects/vertica.md)
+
 ## Setup
 
 You need Docker with Compose v2 and Python 3.10+. No local JVM is needed, because Spark is
@@ -58,7 +65,9 @@ python -m conformance down            # stops the engines and deletes their data
    ```
 
    Commit `baseline.json` together with the fix. Only update the baseline to record fixes or genuinely
-   unfixable differences, never to hide a regression.
+   unfixable differences, never to hide a regression. A filtered update, such as one with `-k`,
+   `--read` or `--engines`, only rewrites the entries of the checks that ran. Entries of deleted
+   cases are only removed by a full run on every engine.
 
 5. To test a new behavior that no case covers yet, add a case (see below). A new case that fails is
    reported as a new failure until it's fixed or recorded in the baseline.
@@ -133,7 +142,7 @@ Guidelines:
 - Always give cases a `name`, so that ids and `baseline.json` stay readable.
 
 TPC-H cases are generated from `tests/fixtures/optimizer/tpc-h/tpc-h.sql`. Each query is transpiled
-into Postgres and Spark, which then serve as the source dialects.
+into every engine's dialect, which then serves as the source dialect.
 
 ## Dataset
 
@@ -238,3 +247,5 @@ To debug an engine, use `python -m conformance status` or
 3. Add the engine's physical types to the shared columns in `dataset/tables.py` and `dataset/tpch.py`.
    Run `python -m conformance load` to check that every table reads back exactly.
 4. Add `cases/<dialect>/` with cases written in the new dialect, then run with `--update-baseline`.
+5. Write a guide in `dialects/<dialect>.md`, modeled on [the Vertica guide](dialects/vertica.md), and
+   list it under [Dialect guides](#dialect-guides).

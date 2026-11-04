@@ -265,5 +265,10 @@ class TestRunner(unittest.TestCase):
                 load_baseline(path), {**other, "case transpile:postgres->spark": "error"}
             )
 
+            # Legs that didn't run keep their entries, even if other legs of their case ran
+            vertica = {"case transpile:postgres->vertica": "error"}
+            write_baseline(path, passing, vertica, complete=False)
+            self.assertEqual(load_baseline(path), vertica)
+
             write_baseline(path, passing, load_baseline(path), complete=True)
             self.assertEqual(load_baseline(path), {})

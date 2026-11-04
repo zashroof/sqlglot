@@ -212,7 +212,8 @@ def _run(args: argparse.Namespace) -> int:
     print(f"Report: {args.report}")
 
     if args.update_baseline:
-        complete = not (args.patterns or args.read or args.write or args.case_paths or adhoc)
+        filtered = args.patterns or args.read or args.write or args.case_paths or adhoc
+        complete = not filtered and set(args.engines) == set(ENGINES)
         failures = write_baseline(args.baseline, results, baseline, complete)
         print(f"Baseline updated: {len(failures)} known failures in {args.baseline}")
         return 0

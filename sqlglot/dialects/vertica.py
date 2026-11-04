@@ -11,6 +11,9 @@ class Vertica(Postgres):
     """
     Vertica (OpenText Analytics Database). Its SQL derives from Postgres, so this dialect builds on
     the Postgres one. Reference: https://docs.vertica.com/latest/en/sql-reference/
+
+    conformance/dialects/vertica.md documents how this dialect models Vertica, what it supports, its
+    known bugs, and how to test changes against a real Vertica.
     """
 
     # Identifiers are case-insensitive, even when quoted
