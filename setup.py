@@ -32,6 +32,7 @@ setup(
         "conformance": [
             "psycopg[binary]>=3.2",
             "pyspark-client==4.2.0; python_version >= '3.10'",
+            "vertica-python>=1.4",
         ],
         # Deprecated: the Rust tokenizer has been replaced by sqlglotc.
         "rs": ["sqlglotrs==0.13.0", f"sqlglotc=={version}; python_version >= '3.10'"],

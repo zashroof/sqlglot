@@ -118,7 +118,7 @@ def parse_case_file(path: Path) -> list[Case]:
 
 def tpch_cases() -> list[Case]:
     """
-    The TPC-H queries from the optimizer fixtures, run from both Postgres and Spark. The fixture is
+    The TPC-H queries from the optimizer fixtures, run from every engine's dialect. The fixture is
     written in sqlglot's own dialect, so each query is first transpiled into the source dialect.
     That's sound because the source engine computes the ground truth of whatever SQL it is given.
     """
@@ -139,7 +139,7 @@ def tpch_cases() -> list[Case]:
             read=read,
             file=str(path.relative_to(CASES_DIR.parent.parent)),
         )
-        for read in ("postgres", "spark")
+        for read in ("postgres", "spark", "vertica")
         for i, query in enumerate(queries, 1)
     ]
 

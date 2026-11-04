@@ -14,11 +14,11 @@ from conformance.dataset.model import Table, shared
 TPCH_DIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "optimizer" / "tpc-h"
 
 _PHYSICAL = {
-    "bigint": ("BIGINT", "BIGINT"),
-    "int": ("INTEGER", "INT"),
-    "decimal": ("NUMERIC(15, 2)", "DECIMAL(15, 2)"),
-    "date": ("DATE", "DATE"),
-    "text": ("TEXT", "STRING"),
+    "bigint": ("BIGINT", "BIGINT", "INT"),
+    "int": ("INTEGER", "INT", "INT"),
+    "decimal": ("NUMERIC(15, 2)", "DECIMAL(15, 2)", "NUMERIC(15, 2)"),
+    "date": ("DATE", "DATE", "DATE"),
+    "text": ("TEXT", "STRING", "VARCHAR(200)"),
 }
 
 _PARSERS: dict[str, t.Callable[[str], t.Any]] = {

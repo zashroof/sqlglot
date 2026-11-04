@@ -38,7 +38,10 @@ def ensure_dataset(
             continue
 
         log(f"Loading {table.name} into {engine.name} ({len(table.rows)} rows)")
-        engine.load_table(table)
+        try:
+            engine.load_table(table)
+        except EngineError as e:
+            raise DatasetError(f"can't load {table.name} into {engine.name}: {e}") from e
         verify_table(engine, table)
 
         loaded[table.name] = table.fingerprint
@@ -55,7 +58,7 @@ def verify_table(engine: Engine, table: Table) -> None:
         columns=[column.name for column in table.columns],
         types=["dataset"] * len(table.columns),
         families=actual.families,
-        rows=table.expected_rows(),
+        rows=table.expected_rows(engine.CHAR_LENGTH_IN_BYTES),
     )
 
     comparison = compare_results(expected, actual, ordered=False, timezone_name=engine.timezone)
@@ -77,6 +80,9 @@ def _read_meta(engine: Engine) -> dict[str, str]:
 
 
 def _write_meta(engine: Engine, loaded: dict[str, str]) -> None:
-    columns = [shared("name", "TEXT", "STRING"), shared("fingerprint", "TEXT", "STRING")]
+    columns = [
+        shared("name", "TEXT", "STRING", "VARCHAR(100)"),
+        shared("fingerprint", "TEXT", "STRING", "VARCHAR(100)"),
+    ]
     rows = sorted(loaded.items())
     engine.load_table(Table(META_TABLE, columns, lambda: rows))

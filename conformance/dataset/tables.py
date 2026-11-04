@@ -26,28 +26,28 @@ UTC = timezone.utc
 D = Decimal
 
 SCALAR_COLUMNS = [
-    shared("id", "INTEGER", "INT"),
-    shared("label", "TEXT", "STRING"),
-    shared("v_bool", "BOOLEAN", "BOOLEAN"),
-    shared("v_int2", "SMALLINT", "SMALLINT"),
-    shared("v_int4", "INTEGER", "INT"),
-    shared("v_int8", "BIGINT", "BIGINT"),
-    shared("v_float4", "REAL", "FLOAT"),
-    shared("v_float8", "DOUBLE PRECISION", "DOUBLE"),
-    shared("v_dec", "NUMERIC(10, 2)", "DECIMAL(10, 2)"),
-    shared("v_dec38", "NUMERIC(38, 10)", "DECIMAL(38, 10)"),
-    shared("v_text", "TEXT", "STRING"),
-    shared("v_varchar", "VARCHAR(20)", "VARCHAR(20)"),
-    shared("v_char", "CHAR(5)", "CHAR(5)", char_length=5),
-    shared("v_bytes", "BYTEA", "BINARY"),
-    shared("v_date", "DATE", "DATE"),
+    shared("id", "INTEGER", "INT", "INT"),
+    shared("label", "TEXT", "STRING", "VARCHAR(100)"),
+    shared("v_bool", "BOOLEAN", "BOOLEAN", "BOOLEAN"),
+    shared("v_int2", "SMALLINT", "SMALLINT", "SMALLINT"),
+    shared("v_int4", "INTEGER", "INT", "INT"),
+    shared("v_int8", "BIGINT", "BIGINT", "BIGINT"),
+    shared("v_float4", "REAL", "FLOAT", "FLOAT"),
+    shared("v_float8", "DOUBLE PRECISION", "DOUBLE", "FLOAT"),
+    shared("v_dec", "NUMERIC(10, 2)", "DECIMAL(10, 2)", "NUMERIC(10, 2)"),
+    shared("v_dec38", "NUMERIC(38, 10)", "DECIMAL(38, 10)", "NUMERIC(38, 10)"),
+    shared("v_text", "TEXT", "STRING", "VARCHAR(1000)"),
+    shared("v_varchar", "VARCHAR(20)", "VARCHAR(20)", "VARCHAR(20)"),
+    shared("v_char", "CHAR(5)", "CHAR(5)", "CHAR(5)", char_length=5),
+    shared("v_bytes", "BYTEA", "BINARY", "VARBINARY(100)"),
+    shared("v_date", "DATE", "DATE", "DATE"),
     # A wall-clock timestamp: Spark's TIMESTAMP is an instant, so the equivalent is TIMESTAMP_NTZ
-    shared("v_ts", "TIMESTAMP", "TIMESTAMP_NTZ"),
-    shared("v_tstz", "TIMESTAMPTZ", "TIMESTAMP"),
-    shared("v_int_arr", "INTEGER[]", "ARRAY<INT>"),
-    shared("v_text_arr", "TEXT[]", "ARRAY<STRING>"),
+    shared("v_ts", "TIMESTAMP", "TIMESTAMP_NTZ", "TIMESTAMP"),
+    shared("v_tstz", "TIMESTAMPTZ", "TIMESTAMP", "TIMESTAMPTZ"),
+    shared("v_int_arr", "INTEGER[]", "ARRAY<INT>", "ARRAY[INT]"),
+    shared("v_text_arr", "TEXT[]", "ARRAY<STRING>", "ARRAY[VARCHAR(100)]"),
     # Spark has no JSON type; JSON functions operate on strings
-    shared("v_json", "JSONB", "STRING"),
+    shared("v_json", "JSONB", "STRING", "VARCHAR(1000)"),
 ]
 
 _SCALAR_NAMES = [c.name for c in SCALAR_COLUMNS]
@@ -160,7 +160,8 @@ def _scalar_rows() -> list[tuple]:
             v_bool=False,
             v_int2=-32768,
             v_int4=-2147483648,
-            v_int8=-9223372036854775808,
+            # Vertica can't store -2^63, which it uses to represent NULL
+            v_int8=-9223372036854775807,
             v_float4=-3.4028234663852886e38,
             v_float8=-1.7976931348623157e308,
             v_dec=D("-99999999.99"),
@@ -320,9 +321,9 @@ def _facts_rows() -> list[tuple]:
 
 
 _JOIN_COLUMNS = [
-    shared("id", "INTEGER", "INT"),
-    shared("k", "INTEGER", "INT"),
-    shared("val", "TEXT", "STRING"),
+    shared("id", "INTEGER", "INT", "INT"),
+    shared("k", "INTEGER", "INT", "INT"),
+    shared("val", "TEXT", "STRING", "VARCHAR(20)"),
 ]
 
 TABLES = [
@@ -335,15 +336,15 @@ TABLES = [
     Table(
         "facts",
         [
-            shared("id", "BIGINT", "BIGINT"),
-            shared("grp", "INTEGER", "INT"),
-            shared("cat", "TEXT", "STRING"),
-            shared("qty", "INTEGER", "INT"),
-            shared("price", "NUMERIC(12, 2)", "DECIMAL(12, 2)"),
-            shared("score", "DOUBLE PRECISION", "DOUBLE"),
-            shared("flag", "BOOLEAN", "BOOLEAN"),
-            shared("d", "DATE", "DATE"),
-            shared("ts", "TIMESTAMP", "TIMESTAMP_NTZ"),
+            shared("id", "BIGINT", "BIGINT", "INT"),
+            shared("grp", "INTEGER", "INT", "INT"),
+            shared("cat", "TEXT", "STRING", "VARCHAR(20)"),
+            shared("qty", "INTEGER", "INT", "INT"),
+            shared("price", "NUMERIC(12, 2)", "DECIMAL(12, 2)", "NUMERIC(12, 2)"),
+            shared("score", "DOUBLE PRECISION", "DOUBLE", "FLOAT"),
+            shared("flag", "BOOLEAN", "BOOLEAN", "BOOLEAN"),
+            shared("d", "DATE", "DATE", "DATE"),
+            shared("ts", "TIMESTAMP", "TIMESTAMP_NTZ", "TIMESTAMP"),
         ],
         _facts_rows,
         f"{FACTS_ROWS} generated rows with skew, ties and NULLs",
@@ -440,5 +441,53 @@ TABLES = [
             (4, 0, {"z": None}, {"a": -1, "b": ""}, [None], [[None]], {"e": []}),
         ],
         "Spark-only types",
+    ),
+    Table(
+        "vertica_extras",
+        [
+            column("id", vertica="INT"),
+            column("v_uuid", vertica="UUID"),
+            column("v_time", vertica="TIME"),
+            column("v_interval", vertica="INTERVAL DAY TO SECOND"),
+            column("v_numeric", vertica="NUMERIC(60, 20)"),
+            column("v_long_varchar", vertica="LONG VARCHAR"),
+            column("v_binary", vertica="BINARY(4)"),
+            column("v_row", vertica="ROW(a INT, b VARCHAR(20))"),
+        ],
+        lambda: [
+            (
+                1,
+                # Vertica stores the nil UUID as NULL
+                UUID("00000000-0000-0000-0000-000000000001"),
+                time(0, 0),
+                timedelta(0),
+                D("0"),
+                "",
+                b"\x00\x00\x00\x00",
+                {"a": 1, "b": "x"},
+            ),
+            (
+                2,
+                UUID("123e4567-e89b-12d3-a456-426614174000"),
+                time(23, 59, 59, 999999),
+                timedelta(days=1, hours=2, minutes=3, seconds=4, microseconds=500000),
+                D("3.14159265358979323846"),
+                "long " * 200,
+                b"\x01\x02\x03\x04",
+                {"a": None, "b": None},
+            ),
+            (3, None, None, None, None, None, None, None),
+            (
+                4,
+                UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+                time(12, 30),
+                timedelta(hours=-3),
+                D("-100000000000000000000"),
+                "ü",
+                b"\xff\xff\xff\xff",
+                {"a": -1, "b": ""},
+            ),
+        ],
+        "Vertica-only types",
     ),
 ]

@@ -34,6 +34,8 @@ class Engine:
     dialect: t.ClassVar[str]
     # Service name in docker-compose.yml
     service: t.ClassVar[str]
+    # Whether CHAR(n) lengths count bytes instead of characters
+    CHAR_LENGTH_IN_BYTES: t.ClassVar[bool] = False
 
     def __init__(self, timezone: str = "UTC") -> None:
         self.timezone = timezone

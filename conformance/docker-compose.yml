@@ -2,7 +2,7 @@
 #
 # Every engine is pinned to UTC and to settings that keep results deterministic. Host ports
 # are deliberately non-default so they don't clash with locally installed databases; override
-# them with CONFORMANCE_POSTGRES_PORT / CONFORMANCE_SPARK_PORT.
+# them with CONFORMANCE_POSTGRES_PORT / CONFORMANCE_SPARK_PORT / CONFORMANCE_VERTICA_PORT.
 name: sqlglot-conformance
 
 services:
@@ -76,3 +76,23 @@ services:
       timeout: 5s
       retries: 60
       start_period: 5s
+
+  vertica:
+    # Built locally from the public Vertica image, see docker/vertica/Dockerfile
+    build: ./docker/vertica
+    image: sqlglot-conformance-vertica:25.3.0-8
+    environment:
+      TZ: UTC
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:${CONFORMANCE_VERTICA_PORT:-55433}:5433"
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "/opt/vertica/bin/vsql", "-U", "dbadmin", "-w", "sqlglot", "-Atc", "SELECT 1"]
+      interval: 3s
+      timeout: 10s
+      retries: 100
+      start_period: 10s

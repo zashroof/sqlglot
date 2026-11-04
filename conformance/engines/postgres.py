@@ -91,6 +91,13 @@ class Postgres(Engine):
         ):
             connection.execute("SELECT set_config(%s, %s, false)", (setting, value))
 
+        # LEVENSHTEIN, which sqlglot generates for other dialects' edit distance functions, is
+        # part of this standard extension
+        try:
+            connection.execute("CREATE EXTENSION IF NOT EXISTS fuzzystrmatch")
+        except psycopg.Error:
+            pass
+
         self._types = {
             oid: (name, category)
             for oid, name, category in connection.execute(

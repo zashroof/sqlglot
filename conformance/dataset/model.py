@@ -55,17 +55,20 @@ class Table:
             digest.update(repr(row).encode())
         return digest.hexdigest()
 
-    def expected_rows(self) -> list[tuple]:
-        """The rows as an engine is expected to return them."""
+    def expected_rows(self, char_length_in_bytes: bool = False) -> list[tuple]:
+        """The rows as an engine is expected to return them, with CHAR(n) values padded."""
         lengths = [column.char_length for column in self.columns]
         if not any(lengths):
             return self.rows
+
+        def pad(value: t.Any, length: int | None) -> t.Any:
+            if not length or not isinstance(value, str):
+                return value
+            size = len(value.encode()) if char_length_in_bytes else len(value)
+            return value + " " * (length - size)
+
         return [
-            tuple(
-                value.ljust(length) if length and isinstance(value, str) else value
-                for value, length in zip(row, lengths)
-            )
-            for row in self.rows
+            tuple(pad(value, length) for value, length in zip(row, lengths)) for row in self.rows
         ]
 
 
@@ -74,12 +77,15 @@ def column(
     *,
     postgres: str | None = None,
     spark: str | None = None,
+    vertica: str | None = None,
     char_length: int | None = None,
 ) -> Column:
-    types = {engine: ddl for engine, ddl in (("postgres", postgres), ("spark", spark)) if ddl}
-    return Column(name, types, char_length)
+    engines = (("postgres", postgres), ("spark", spark), ("vertica", vertica))
+    return Column(name, {engine: ddl for engine, ddl in engines if ddl}, char_length)
 
 
-def shared(name: str, postgres: str, spark: str, char_length: int | None = None) -> Column:
+def shared(
+    name: str, postgres: str, spark: str, vertica: str, char_length: int | None = None
+) -> Column:
     """A column that exists on every engine."""
-    return column(name, postgres=postgres, spark=spark, char_length=char_length)
+    return column(name, postgres=postgres, spark=spark, vertica=vertica, char_length=char_length)

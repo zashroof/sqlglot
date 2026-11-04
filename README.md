@@ -633,6 +633,7 @@ Without dateutil, the optimizer leaves this arithmetic unevaluated.
 | Teradata | Community |
 | Trino | Official |
 | TSQL | Official |
+| Vertica | Community |
 | YDB | [Plugin](https://pypi.org/project/ydb-sqlglot-plugin) |
 | MaxCompute | [Plugin](https://pypi.org/project/sqlglot-maxcompute) |
 

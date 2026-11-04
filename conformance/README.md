@@ -14,7 +14,8 @@ checks that the SQL sqlglot generates returns the same result:
 Expected results are never written by hand: they always come from the source engine. A case can't
 be made to pass by editing it, only by fixing sqlglot.
 
-The suite runs locally only; it isn't part of CI. It currently covers Postgres 18 and Spark 4.2.
+The suite runs locally only; it isn't part of CI. It currently covers Postgres 18, Spark 4.2 and
+Vertica 25.3.
 
 ## Setup
 
@@ -22,9 +23,9 @@ You need Docker with Compose v2 and Python 3.10+. No local JVM is needed, becaus
 reached through Spark Connect.
 
 ```bash
-pip install -e ".[dev,conformance]"   # adds psycopg and pyspark-client
-python -m conformance up              # starts the engines and loads the dataset (about a minute)
-python -m conformance run             # runs every case (about a minute)
+pip install -e ".[dev,conformance]"   # adds psycopg, pyspark-client and vertica-python
+python -m conformance up              # starts the engines and loads the dataset (a few minutes)
+python -m conformance run             # runs every case (under two minutes)
 python -m conformance down            # stops the engines and deletes their data
 ```
 
@@ -148,23 +149,27 @@ are reloaded automatically whenever their definition or data changes.
 | `join_left`, `join_right` | 6, 5 | Join keys with duplicates, NULLs and unmatched keys |
 | `pg_extras` | 4 | Postgres-only types: UUID, TIME, INTERVAL, unconstrained NUMERIC, JSON, INET, 2D arrays |
 | `spark_extras` | 4 | Spark-only types: TINYINT, MAP, STRUCT, nested arrays |
+| `vertica_extras` | 4 | Vertica-only types: UUID, TIME, INTERVAL, NUMERIC(60, 20), LONG VARCHAR, BINARY, ROW |
 | TPC-H tables | 5 to 8,233 | `lineitem`, `orders`, `customer`, `part`, `supplier`, `partsupp`, `nation`, `region` |
 
 The `scalars` columns and their physical types:
 
-| Column | Postgres | Spark |
-|---|---|---|
-| `v_bool` | BOOLEAN | BOOLEAN |
-| `v_int2`, `v_int4`, `v_int8` | SMALLINT, INTEGER, BIGINT | SMALLINT, INT, BIGINT |
-| `v_float4`, `v_float8` | REAL, DOUBLE PRECISION | FLOAT, DOUBLE |
-| `v_dec`, `v_dec38` | NUMERIC(10, 2), NUMERIC(38, 10) | DECIMAL(10, 2), DECIMAL(38, 10) |
-| `v_text`, `v_varchar`, `v_char` | TEXT, VARCHAR(20), CHAR(5) | STRING, VARCHAR(20), CHAR(5) |
-| `v_bytes` | BYTEA | BINARY |
-| `v_date` | DATE | DATE |
-| `v_ts` | TIMESTAMP | TIMESTAMP_NTZ |
-| `v_tstz` | TIMESTAMPTZ | TIMESTAMP |
-| `v_int_arr`, `v_text_arr` | INTEGER[], TEXT[] | `ARRAY<INT>`, `ARRAY<STRING>` |
-| `v_json` | JSONB | STRING |
+| Column | Postgres | Spark | Vertica |
+|---|---|---|---|
+| `v_bool` | BOOLEAN | BOOLEAN | BOOLEAN |
+| `v_int2`, `v_int4`, `v_int8` | SMALLINT, INTEGER, BIGINT | SMALLINT, INT, BIGINT | SMALLINT, INT, BIGINT, all 64-bit |
+| `v_float4`, `v_float8` | REAL, DOUBLE PRECISION | FLOAT, DOUBLE | FLOAT, FLOAT, both 64-bit |
+| `v_dec`, `v_dec38` | NUMERIC(10, 2), NUMERIC(38, 10) | DECIMAL(10, 2), DECIMAL(38, 10) | NUMERIC(10, 2), NUMERIC(38, 10) |
+| `v_text`, `v_varchar`, `v_char` | TEXT, VARCHAR(20), CHAR(5) | STRING, VARCHAR(20), CHAR(5) | VARCHAR(1000), VARCHAR(20), CHAR(5), lengths in bytes |
+| `v_bytes` | BYTEA | BINARY | VARBINARY(100) |
+| `v_date` | DATE | DATE | DATE |
+| `v_ts` | TIMESTAMP | TIMESTAMP_NTZ | TIMESTAMP |
+| `v_tstz` | TIMESTAMPTZ | TIMESTAMP | TIMESTAMPTZ |
+| `v_int_arr`, `v_text_arr` | INTEGER[], TEXT[] | `ARRAY<INT>`, `ARRAY<STRING>` | `ARRAY[INT]`, `ARRAY[VARCHAR(100)]` |
+| `v_json` | JSONB | STRING | VARCHAR(1000) |
+
+Shared tables only hold values that every engine stores identically. For example, the BIGINT minimum
+is -2^63 + 1, because Vertica stores -2^63 as NULL, and the nil UUID is avoided for the same reason.
 
 Physical types are written by hand, never generated with sqlglot. Otherwise a wrong type mapping
 would make both engines store the same wrong thing. Tables that only some engines support are only
@@ -196,6 +201,17 @@ with `-v`. They don't make a leg fail.
 |---|---|---|
 | Postgres | `postgres:18.4` | UTC, `PG_UNICODE_FAST` builtin locale, so ordering and UPPER/LOWER match Spark |
 | Spark | `apache/spark:4.2.0` | Spark Connect, UTC, ANSI mode on, in-memory catalog |
+| Vertica | Built from `opentext/vertica-k8s:25.3.0-8` | Single node, Community Edition license, UTC, binary collation |
+
+Vertica's Community Edition images are no longer public, so `docker/vertica/` builds a single-node
+database on top of the public Kubernetes image, which normally needs the VerticaDB operator. Its
+entrypoint creates certificates and the database on the first start. 25.3 is the newest release
+that accepts the Community Edition license. The first `up` builds the image and creates the
+database, which takes about a minute.
+
+The Vertica adapter uses binary transfer, because the text protocol rounds floats to 15 significant
+digits. It also collects statistics after loading each table, because without them Vertica picks
+join plans slow enough to time out.
 
 Both run on non-default host ports. Environment variables configure the connections:
 
@@ -203,8 +219,10 @@ Both run on non-default host ports. Environment variables configure the connecti
 |---|---|
 | `CONFORMANCE_POSTGRES_PORT` | `55432` |
 | `CONFORMANCE_SPARK_PORT` | `55002` |
+| `CONFORMANCE_VERTICA_PORT` | `55433` |
 | `CONFORMANCE_POSTGRES_DSN` | Set this to use an existing Postgres server instead of Docker |
 | `CONFORMANCE_SPARK_REMOTE` | Set this to an `sc://host:port` URL to use an existing Spark Connect server |
+| `CONFORMANCE_VERTICA_DSN` | Set this to `host=... port=... user=... password=... database=...` to use an existing Vertica server |
 
 To debug an engine, use `python -m conformance status` or
 `docker compose -p sqlglot-conformance logs spark`. To reload the dataset from scratch, run
@@ -214,7 +232,7 @@ To debug an engine, use `python -m conformance status` or
 
 1. Subclass `Engine` in `engines/<name>.py`. Implement `connect`, `close`, `version`, `query` and
    `load_table`, map driver types to the families used in `compare.py`, and register the class in
-   `engines/__init__.py`.
+   `engines/__init__.py`. Set `CHAR_LENGTH_IN_BYTES` if CHAR(n) counts bytes, as in Vertica.
 2. Add a service to `docker-compose.yml`. Pin its version, use UTC, and choose settings that match
    the other engines' string ordering.
 3. Add the engine's physical types to the shared columns in `dataset/tables.py` and `dataset/tpch.py`.
