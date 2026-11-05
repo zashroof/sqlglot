@@ -383,6 +383,9 @@ class Generator:
     # Whether query hints should be generated
     QUERY_HINTS = True
 
+    # Whether the MATCH_RECOGNIZE clause follows WHERE, as Vertica's MATCH does, instead of FROM
+    MATCH_AFTER_WHERE = False
+
     # What kind of separator to use for query hints
     QUERY_HINT_SEP = ", "
 
@@ -1607,7 +1610,8 @@ class Generator:
         cycle = self.sql(expression, "cycle")
         cycle = f" {cycle}" if cycle else ""
 
-        sql = f"WITH {recursive}{sql}{search}{cycle}" if sql else ""
+        hint = self.sql(expression, "hint")
+        sql = f"WITH{hint} {recursive}{sql}{search}{cycle}" if sql else ""
         return f"{udfs} {sql}" if udfs and sql else f"{udfs}{sql}"
 
     def cte_sql(self, expression: exp.CTE) -> str:
@@ -3491,10 +3495,11 @@ class Generator:
         return csv(
             *sqls,
             *[self.sql(join) for join in expression.args.get("joins") or []],
-            self.sql(expression, "match"),
+            "" if self.MATCH_AFTER_WHERE else self.sql(expression, "match"),
             *[self.sql(lateral) for lateral in expression.args.get("laterals") or []],
             self.sql(expression, "prewhere"),
             self.sql(expression, "where"),
+            self.sql(expression, "match") if self.MATCH_AFTER_WHERE else "",
             self.sql(expression, "connect"),
             self.sql(expression, "group"),
             self.sql(expression, "having"),

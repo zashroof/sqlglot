@@ -1936,6 +1936,12 @@ class Kwarg(Expression, Binary):
     """Kwarg in special functions like func(kwarg => y)."""
 
 
+class UsingParameters(Expression):
+    """Vertica's named function parameters: the `x USING PARAMETERS a=1` in f(x USING PARAMETERS a=1)."""
+
+    arg_types = {"this": False, "expressions": True}
+
+
 class Alias(Expression):
     arg_types = {"this": True, "alias": False}
 
@@ -2157,6 +2163,11 @@ class Div(Expression, Binary):
 
 class Overlaps(Expression, Binary, Predicate):
     pass
+
+
+# Vertica's event series join predicate: a INTERPOLATE { PREVIOUS | NEXT } VALUE b
+class Interpolate(Expression, Binary, Predicate):
+    arg_types = {"this": True, "expression": True, "next": False}
 
 
 class ExtendsLeft(Expression, Binary, Predicate):
@@ -2483,6 +2494,7 @@ def convert(value: t.Any, copy: bool = False) -> Expr:
 
 
 QUERY_MODIFIERS = {
+    "when": False,
     "match": False,
     "laterals": False,
     "joins": False,
@@ -2490,6 +2502,7 @@ QUERY_MODIFIERS = {
     "pivots": False,
     "prewhere": False,
     "where": False,
+    "timeseries": False,
     "group": False,
     "having": False,
     "qualify": False,

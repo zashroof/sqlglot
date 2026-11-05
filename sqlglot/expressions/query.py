@@ -454,6 +454,7 @@ class RecursiveWithSearch(Expression):
 
 class With(Expression):
     arg_types = {
+        "hint": False,
         "expressions": False,
         "recursive": False,
         "search": False,

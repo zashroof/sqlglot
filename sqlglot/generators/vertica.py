@@ -3,10 +3,17 @@ from __future__ import annotations
 import typing as t
 
 from sqlglot import exp, transforms
-from sqlglot.dialects.dialect import date_delta_sql, no_filter_sql, rename_func
+from sqlglot.dialects.dialect import no_filter_sql, rename_func, unit_to_var
 from sqlglot.generator import unsupported_args
 from sqlglot.generators.postgres import PostgresGenerator
-from sqlglot.parsers.vertica import IMPLICIT_NULL_ORDERING
+from sqlglot.parsers.vertica import (
+    BYTEWISE_LIKE,
+    IMPLICIT_NULL_ORDERING,
+    TRANSFORM_PARTITIONS,
+    TYPED_LITERAL,
+    ZERO_NULL_FUNCTION,
+    format_time_outside_quotes,
+)
 
 # The longest VARCHAR / VARBINARY, used for types that are unbounded in other dialects
 MAX_STRING_LENGTH = 65000
@@ -32,6 +39,8 @@ def _cross_joins_to_commas(expression: exp.Expr) -> exp.Expr:
         and not join.args.get("on")
         and not join.args.get("using")
         and not isinstance(join.this, (exp.Lateral, exp.Unnest))
+        # Table functions such as EXPLODE are only allowed in joins
+        and not isinstance(join.this.this, exp.Func)
         for join in joins
     ):
         for join in joins:
@@ -69,14 +78,30 @@ def _order_outside_for_null_placement(expression: exp.Expr) -> exp.Expr:
         keys.append(key)
 
     inner = query.copy()
-    for arg in ("order", "limit", "offset"):
+    for arg in ("order", "limit", "offset", "when"):
         inner.set(arg, None)
 
     outer = exp.select("*").from_(inner.subquery("_q"))
     outer.set("order", exp.Order(expressions=keys))
-    outer.set("limit", query.args.get("limit"))
-    outer.set("offset", query.args.get("offset"))
+    for arg in ("limit", "offset", "when"):
+        outer.set(arg, query.args.get(arg))
     return outer
+
+
+def _date_delta_sql(
+    name: str,
+) -> t.Callable[[VerticaGenerator, exp.DateDiff | exp.TimestampAdd], str]:
+    def _delta_sql(self: VerticaGenerator, expression: exp.DateDiff | exp.TimestampAdd) -> str:
+        # A parenthesized unit is an expression that Vertica evaluates at runtime
+        unit = expression.unit
+        return self.func(
+            name,
+            unit if isinstance(unit, exp.Paren) else unit_to_var(expression),
+            expression.expression,
+            expression.this,
+        )
+
+    return _delta_sql
 
 
 class VerticaGenerator(PostgresGenerator):
@@ -85,7 +110,17 @@ class VerticaGenerator(PostgresGenerator):
     # INTERVAL '30' MINUTES parses as INTERVAL '30' aliased as MINUTES
     INTERVAL_ALLOWS_PLURAL_FORM = False
     LIMIT_FETCH = "LIMIT"
+    IGNORE_NULLS_IN_FUNC = True
     VALUES_AS_TABLE = False
+    LAST_DAY_SUPPORTS_DATE_PART = False
+    MATCH_AFTER_WHERE = True
+    QUERY_HINTS = True
+
+    AFTER_HAVING_MODIFIER_TRANSFORMS = {
+        **PostgresGenerator.AFTER_HAVING_MODIFIER_TRANSFORMS,
+        "timeseries": lambda self, e: self.sql(e, "timeseries"),
+    }
+    STRUCT_DELIMITER = ("(", ")")
 
     TYPE_MAPPING = {
         **PostgresGenerator.TYPE_MAPPING,
@@ -96,6 +131,7 @@ class VerticaGenerator(PostgresGenerator):
         exp.DType.LONGBLOB: "LONG VARBINARY",
         exp.DType.LONGTEXT: "LONG VARCHAR",
         exp.DType.ROWVERSION: "VARBINARY",
+        exp.DType.STRUCT: "ROW",
         exp.DType.TEXT: "VARCHAR",
         exp.DType.VARBINARY: "VARBINARY",
     }
@@ -104,16 +140,35 @@ class VerticaGenerator(PostgresGenerator):
         **{
             k: v
             for k, v in PostgresGenerator.TRANSFORMS.items()
-            if k not in (exp.GroupConcat, exp.Levenshtein, exp.RegexpReplace, exp.StrPosition)
+            if k
+            not in (
+                exp.CurrentTimestamp,
+                exp.GroupConcat,
+                exp.LastDay,
+                exp.Levenshtein,
+                exp.RegexpReplace,
+                # Unlike Postgres, Vertica rounds floats without casting them to NUMERIC
+                exp.Round,
+                exp.StrPosition,
+                exp.TryCast,
+            )
         },
+        exp.Day: rename_func("DAY"),
+        exp.DayOfMonth: rename_func("DAYOFMONTH"),
         exp.DayOfWeek: rename_func("DAYOFWEEK"),
         exp.DayOfWeekIso: rename_func("DAYOFWEEK_ISO"),
         exp.DayOfYear: rename_func("DAYOFYEAR"),
+        exp.ArgMax: lambda self, e: self.func("ARGMAX", e.expression, e.this),
+        exp.ArgMin: lambda self, e: self.func("ARGMIN", e.expression, e.this),
         exp.ArrayContains: rename_func("CONTAINS"),
-        exp.DateDiff: date_delta_sql("DATEDIFF"),
+        exp.ArrayFilter: rename_func("FILTER"),
+        exp.DateDiff: _date_delta_sql("DATEDIFF"),
+        exp.Explode: rename_func("EXPLODE"),
         exp.Filter: no_filter_sql,
         exp.Hex: rename_func("TO_HEX"),
+        exp.ToChar: rename_func("TO_CHAR"),
         exp.IntDiv: lambda self, e: self.binary(e, "//"),
+        exp.Month: rename_func("MONTH"),
         exp.NullSafeEQ: lambda self, e: self.binary(e, "<=>"),
         exp.NullSafeNEQ: lambda self, e: f"NOT {self.binary(e, '<=>')}",
         exp.Select: transforms.preprocess(
@@ -127,13 +182,75 @@ class VerticaGenerator(PostgresGenerator):
         ),
         exp.Except: lambda self, e: self._set_operation_sql(e),
         exp.Intersect: lambda self, e: self._set_operation_sql(e),
+        exp.TimestampAdd: _date_delta_sql("TIMESTAMPADD"),
+        exp.SHA: rename_func("SHA1"),
         exp.StartsWith: lambda self, e: self.sql(
             exp.Left(this=e.this, expression=exp.Length(this=e.expression)).eq(e.expression)
         ),
+        exp.Stuff: rename_func("INSERT"),
         exp.Union: lambda self, e: self._set_operation_sql(e),
         exp.Unhex: rename_func("HEX_TO_BINARY"),
         exp.Uuid: lambda *_: "UUID_GENERATE()",
+        exp.Year: rename_func("YEAR"),
     }
+
+    def prepend_ctes(self, expression: exp.Expr, sql: str) -> str:
+        sql = super().prepend_ctes(expression, sql)
+        when = self.sql(expression, "when")
+        return f"{when}{self.sep()}{sql}" if when else sql
+
+    def historicaldata_sql(self, expression: exp.HistoricalData) -> str:
+        # AT EPOCH LATEST, AT EPOCH n or AT TIME 'timestamp', before a query
+        return f"AT {self.sql(expression, 'kind')} {self.sql(expression, 'expression')}"
+
+    def window_sql(self, expression: exp.Window) -> str:
+        # TIMESERIES slice_time AS '1 second' OVER (PARTITION BY ... ORDER BY ...)
+        if expression.arg_key == "timeseries":
+            window = expression.copy()
+            alias = self.sql(window.args.get("alias"))
+            window.set("alias", None)
+            return f"{self.seg('TIMESERIES')} {alias} AS {super().window_sql(window)}"
+        return super().window_sql(expression)
+
+    @unsupported_args("measures", "after", "alias")
+    def matchrecognize_sql(self, expression: exp.MatchRecognize) -> str:
+        partition = self.partition_by_sql(expression)
+        order = self.sql(expression, "order")
+        define = self.expressions(
+            sqls=[
+                f"{self.sql(definition, 'alias')} AS {self.sql(definition, 'this')}"
+                for definition in expression.args.get("define") or []
+            ]
+        )
+        define = self.seg(f"DEFINE{self.seg(define)}") if define else ""
+        # The parser keeps the pattern's name as its alias
+        pattern = expression.args.get("pattern")
+        pattern_sql = (
+            self.seg(f"PATTERN {self.sql(pattern, 'alias')} AS ({self.sql(pattern, 'this')})")
+            if pattern
+            else ""
+        )
+        rows = self.sql(expression, "rows")
+        rows = self.seg(rows) if rows else ""
+        body = "".join((partition, order, define, pattern_sql, rows))
+        return f"{self.seg('MATCH')} {self.wrap(body.lstrip())}"
+
+    def timeslice_sql(self, expression: exp.TimeSlice) -> str:
+        return self.func(
+            "TIME_SLICE",
+            expression.this,
+            expression.expression,
+            exp.Literal.string(expression.text("unit")),
+            expression.args.get("kind"),
+        )
+
+    def interpolate_sql(self, expression: exp.Interpolate) -> str:
+        direction = "NEXT" if expression.args.get("next") else "PREVIOUS"
+        return self.binary(expression, f"INTERPOLATE {direction} VALUE")
+
+    def ignorenulls_sql(self, expression: exp.IgnoreNulls) -> str:
+        # Unlike Postgres, Vertica supports IGNORE NULLS, inside the function's parentheses
+        return self._embed_ignore_nulls(expression, "IGNORE NULLS")
 
     def _set_operation_sql(self, expression: exp.SetOperation) -> str:
         wrapped = _order_outside_for_null_placement(expression)
@@ -141,11 +258,52 @@ class VerticaGenerator(PostgresGenerator):
             return self.sql(wrapped)
         return self.set_operations(expression)
 
+    def format_time(
+        self,
+        expression: exp.Expr,
+        inverse_time_mapping: dict[str, str] | None = None,
+        inverse_time_trie: dict | None = None,
+    ) -> str | None:
+        return (
+            format_time_outside_quotes(
+                self.sql(expression, "format"),
+                inverse_time_mapping or self.dialect.INVERSE_TIME_MAPPING,
+                inverse_time_trie or self.dialect.INVERSE_TIME_TRIE,
+            )
+            or None
+        )
+
+    def interval_sql(self, expression: exp.Interval) -> str:
+        # (a - b) DAY TO SECOND converts a datetime difference, without the INTERVAL keyword
+        if isinstance(expression.this, exp.Paren) and isinstance(expression.this.this, exp.Sub):
+            return f"{self.sql(expression, 'this')} {self.sql(expression, 'unit')}"
+        return super().interval_sql(expression)
+
+    def cast_sql(self, expression: exp.Cast, safe_prefix: str | None = None) -> str:
+        # Unlike a CAST, TIMESTAMP '...' and TIME '...' take the time zone of the string into account
+        if expression.meta.get(TYPED_LITERAL) and expression.this.is_string:
+            return f"{self.sql(expression, 'to')} {self.sql(expression, 'this')}"
+        return super().cast_sql(expression, safe_prefix=safe_prefix)
+
+    @unsupported_args("nlsparam", "precision", "scale", "safe")
+    def tonumber_sql(self, expression: exp.ToNumber) -> str:
+        return self.func("TO_NUMBER", expression.this, expression.args.get("format"))
+
     def datatype_sql(self, expression: exp.DataType) -> str:
-        if expression.is_type(exp.DType.ARRAY):
-            if expression.expressions:
-                return f"ARRAY[{self.expressions(expression, flat=True)}]"
-            return "ARRAY"
+        if expression.is_type(exp.DType.INTERVAL) and expression.expressions:
+            return f"INTERVAL({self.expressions(expression, flat=True)})"
+
+        if expression.is_type(exp.DType.ARRAY, exp.DType.SET):
+            collection = "SET" if expression.is_type(exp.DType.SET) else "ARRAY"
+            if not expression.expressions:
+                return collection
+            size = self.expressions(expression, key="values", flat=True)
+            size = f"({size})" if size else ""
+            return f"{collection}[{self.expressions(expression, flat=True)}]{size}"
+
+        # BINARY(n) is fixed-length and zero-padded, unlike other dialects' unbounded BINARY
+        if expression.is_type(exp.DType.BINARY) and expression.expressions:
+            return f"BINARY({self.expressions(expression, flat=True)})"
 
         # Columns of these types are unbounded in other dialects, but default to 80 bytes in
         # Vertica. Casts to VARCHAR without a length don't truncate, though.
@@ -179,12 +337,17 @@ class VerticaGenerator(PostgresGenerator):
 
         nulls_first = bool(expression.args.get("nulls_first"))
 
-        # Ordered-set aggregates (e.g. PERCENTILE_CONT, LISTAGG) ignore NULLs and take a single key
-        if isinstance(expression.find_ancestor(exp.WithinGroup, exp.Select), exp.WithinGroup):
+        scope = expression.find_ancestor(exp.WithinGroup, exp.GroupConcat, exp.Window, exp.Select)
+
+        # PERCENTILE_CONT and PERCENTILE_DISC ignore NULLs and take a single key
+        if isinstance(scope, exp.WithinGroup) and isinstance(
+            scope.this, (exp.PercentileCont, exp.PercentileDisc)
+        ):
             return f"{this}{sort_order}"
 
-        # Inside windows, NULLS FIRST/LAST is supported and NULLs sort as the largest values
-        if isinstance(expression.find_ancestor(exp.Window, exp.Select), exp.Window):
+        # Inside windows and other WITHIN GROUP clauses (e.g. LISTAGG, ARGMAX_AGG), NULLS FIRST/LAST
+        # is supported and NULLs sort as the largest values
+        if isinstance(scope, (exp.WithinGroup, exp.GroupConcat, exp.Window)):
             if nulls_first == bool(desc):
                 return f"{this}{sort_order}"
             return f"{this}{sort_order} NULLS {'FIRST' if nulls_first else 'LAST'}"
@@ -226,6 +389,37 @@ class VerticaGenerator(PostgresGenerator):
 
         return self._resolve_ordered_for_null_ordering_simulation(expression) or key
 
+    def partition_by_sql(self, expression: exp.Window | exp.MatchRecognize) -> str:
+        partition = expression.args.get("partition_by") or []
+        if (
+            len(partition) == 1
+            and isinstance(partition[0], exp.Var)
+            and partition[0].name in TRANSFORM_PARTITIONS
+        ):
+            return f"PARTITION {partition[0].name}"
+        return super().partition_by_sql(expression)
+
+    def struct_sql(self, expression: exp.Struct) -> str:
+        fields = [
+            exp.alias_(e.expression, e.name if e.this.is_string else e.this)
+            if isinstance(e, exp.PropertyEQ)
+            else e
+            for e in expression.expressions
+        ]
+        return self.func("ROW", *fields)
+
+    def trycast_sql(self, expression: exp.TryCast) -> str:
+        # x::!type returns NULL where the cast fails
+        this = expression.this
+        if not isinstance(this, (exp.Column, exp.Literal, exp.Func, exp.Paren, exp.Bracket)):
+            this = exp.paren(this, copy=False)
+        return f"{self.sql(this)}::!{self.sql(expression, 'to')}"
+
+    def usingparameters_sql(self, expression: exp.UsingParameters) -> str:
+        parameters = f"USING PARAMETERS {self.expressions(expression, flat=True)}"
+        this = self.sql(expression, "this")
+        return f"{this} {parameters}" if this else parameters
+
     def arraysize_sql(self, expression: exp.ArraySize) -> str:
         dimension = expression.expression
         if dimension and not (dimension.is_int and dimension.to_py() == 1):
@@ -233,17 +427,24 @@ class VerticaGenerator(PostgresGenerator):
         return self.func("ARRAY_LENGTH", expression.this)
 
     def strposition_sql(self, expression: exp.StrPosition) -> str:
+        # Unlike STRPOS, INSTR also searches binary strings
         position = expression.args.get("position")
         occurrence = expression.args.get("occurrence")
-        if position or occurrence:
+        return self.func(
+            "INSTR",
+            expression.this,
+            expression.args.get("substr"),
+            position or (exp.Literal.number(1) if occurrence else None),
+            occurrence,
+        )
+
+    def regexplike_sql(self, expression: exp.RegexpLike) -> str:
+        # Unlike Postgres's ~ operator, REGEXP_LIKE takes flags
+        if expression.args.get("flag"):
             return self.func(
-                "INSTR",
-                expression.this,
-                expression.args.get("substr"),
-                position or exp.Literal.number(1),
-                occurrence,
+                "REGEXP_LIKE", expression.this, expression.expression, expression.args.get("flag")
             )
-        return self.func("STRPOS", expression.this, expression.args.get("substr"))
+        return super().regexplike_sql(expression)
 
     def div_sql(self, expression: exp.Div) -> str:
         # Integer literals don't need type annotations to know that they divide as integers
@@ -254,9 +455,19 @@ class VerticaGenerator(PostgresGenerator):
     def extract_sql(self, expression: exp.Extract) -> str:
         # Vertica's WEEK isn't the ISO 8601 week other dialects mean
         if expression.name.upper() == "WEEK":
+            # EXTRACT can't resolve the type of a string literal, but WEEK_ISO accepts VARCHAR
+            if expression.expression.is_string:
+                return self.func("WEEK_ISO", expression.expression)
             expression = expression.copy()
             expression.set("this", exp.var("ISOWEEK"))
         return super().extract_sql(expression)
+
+    def currenttime_sql(self, expression: exp.CurrentTime) -> str:
+        return self.func("CURRENT_TIME", expression.this) if expression.this else "CURRENT_TIME"
+
+    def currenttimestamp_sql(self, expression: exp.CurrentTimestamp) -> str:
+        precision = expression.this
+        return self.func("CURRENT_TIMESTAMP", precision) if precision else "CURRENT_TIMESTAMP"
 
     def grouping_sql(self, expression: exp.Grouping) -> str:
         # Vertica's GROUPING takes a single argument; GROUPING_ID computes the same bitmask
@@ -327,6 +538,31 @@ class VerticaGenerator(PostgresGenerator):
             )
             for arg in args
         ]
+
+    def coalesce_sql(self, expression: exp.Coalesce) -> str:
+        return self._zero_null_sql(expression)
+
+    def nullif_sql(self, expression: exp.Nullif) -> str:
+        return self._zero_null_sql(expression)
+
+    def _zero_null_sql(self, expression: exp.Coalesce | exp.Nullif) -> str:
+        name = expression.meta.get(ZERO_NULL_FUNCTION)
+        if name:
+            return self.func(name, expression.this)
+        return self.function_fallback_sql(expression)
+
+    def like_sql(self, expression: exp.Like) -> str:
+        if expression.meta.get(BYTEWISE_LIKE):
+            return self._bytewise_like_sql(expression, "LIKEB")
+        return super().like_sql(expression)
+
+    def ilike_sql(self, expression: exp.ILike) -> str:
+        if expression.meta.get(BYTEWISE_LIKE):
+            return self._bytewise_like_sql(expression, "ILIKEB")
+        return super().ilike_sql(expression)
+
+    def _bytewise_like_sql(self, expression: exp.Like | exp.ILike, op: str) -> str:
+        return self.binary(expression, f"NOT {op}" if expression.args.get("negate") else op)
 
     @unsupported_args("ins_cost", "del_cost", "sub_cost", "max_dist")
     def levenshtein_sql(self, expression: exp.Levenshtein) -> str:

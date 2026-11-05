@@ -435,6 +435,7 @@ class TokenType(IntEnum):
     TEMPORARY = auto()
     TOP = auto()
     THEN = auto()
+    TIMESERIES = auto()
     TRUE = auto()
     TRUNCATE = auto()
     TRIGGER = auto()

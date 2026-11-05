@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from sqlglot import exp
 from sqlglot.dialects.dialect import NormalizationStrategy
 from sqlglot.dialects.postgres import Postgres
 from sqlglot.generators.vertica import VerticaGenerator
-from sqlglot.parsers.vertica import VerticaParser
+from sqlglot.parsers.vertica import VerticaParser, format_time_outside_quotes
 from sqlglot.tokens import TokenType
 
 
@@ -34,12 +35,50 @@ class Vertica(Postgres):
     NULL_ORDERING = "nulls_are_small"
 
     SUPPORTS_LIMIT_ALL = False
+    # TABLESAMPLE comes before the table alias
+    ALIAS_POST_TABLESAMPLE = True
     TABLES_REFERENCEABLE_AS_COLUMNS = False
 
+    TIME_MAPPING = {
+        **Postgres.TIME_MAPPING,
+        # Lowercase patterns that contain a mapped one, e.g. "d", but differ from its uppercase form
+        "ad": "ad",
+        "a.d.": "a.d.",
+        "id": "id",
+    }
+
+    @classmethod
+    def format_time(cls, expression: str | exp.Expr | None) -> exp.Expr | None:
+        if isinstance(expression, exp.Expr) and expression.is_string:
+            return exp.Literal.string(
+                format_time_outside_quotes(expression.this, cls.TIME_MAPPING, cls.TIME_TRIE)
+            )
+        return super().format_time(expression)
+
     class Tokenizer(Postgres.Tokenizer):
+        TOKENS_PRECEDING_HINT = {*Postgres.Tokenizer.TOKENS_PRECEDING_HINT, TokenType.WITH}
+        # `!` is the factorial operator, except as part of operators like != and !~~
+        SINGLE_TOKENS = {**Postgres.Tokenizer.SINGLE_TOKENS, "!": TokenType.EXCLAMATION}
+
         KEYWORDS = {
             **Postgres.Tokenizer.KEYWORDS,
+            "/*+": TokenType.HINT,
             "//": TokenType.DIV,
+            "INTERVALYM": TokenType.INTERVAL,
+            "!~": TokenType.RLIKE,
+            "!~*": TokenType.IRLIKE,
+            "!~~": TokenType.LIKE,
+            "!~~*": TokenType.ILIKE,
+            "~#": TokenType.LIKE,
+            "~#*": TokenType.ILIKE,
+            "!~#": TokenType.LIKE,
+            "!~#*": TokenType.ILIKE,
+            "LIKEB": TokenType.LIKE,
+            "ILIKEB": TokenType.ILIKE,
+            # Casts that return NULL instead of failing
+            "::!": TokenType.QDCOLON,
+            "BINARY VARYING": TokenType.VARBINARY,
+            "ROW": TokenType.STRUCT,
             # All integer types are 64-bit and all floating point types are 64-bit
             "INT": TokenType.BIGINT,
             "INTEGER": TokenType.BIGINT,
@@ -51,6 +90,9 @@ class Vertica(Postgres):
             "RAW": TokenType.VARBINARY,
             "LONG VARBINARY": TokenType.LONGBLOB,
             "LONG VARCHAR": TokenType.LONGTEXT,
+            "MATCH": TokenType.MATCH_RECOGNIZE,
+            "MINUS": TokenType.EXCEPT,
+            "TIMESERIES": TokenType.TIMESERIES,
             "DATETIME": TokenType.TIMESTAMP,
             "SMALLDATETIME": TokenType.TIMESTAMP,
             "NUMBER": TokenType.DECIMAL,

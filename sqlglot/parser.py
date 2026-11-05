@@ -1987,6 +1987,10 @@ class Parser:
     # Whether TIMESTAMP <literal> can produce a zone-aware timestamp
     ZONE_AWARE_TIMESTAMP_CONSTRUCTOR: t.ClassVar = False
 
+    # Whether column operators after a typed literal apply to its string, i.e. whether
+    # FLOAT '1.5'::INT means FLOAT ('1.5'::INT) rather than (FLOAT '1.5')::INT
+    TYPED_LITERAL_BINDS_COLUMN_OPS: t.ClassVar = True
+
     # Whether map literals support arbitrary expressions as keys.
     # When True, allows complex keys like arrays or literals: {[1, 2]: 3}, {1: 2} (e.g. DuckDB).
     # When False, keys are typically restricted to identifiers.
@@ -4320,6 +4324,7 @@ class Parser:
             return None
 
         comments = self._prev_comments
+        hint = self._parse_hint()
         recursive = self._match(TokenType.RECURSIVE)
 
         last_comments = None
@@ -4357,6 +4362,7 @@ class Parser:
 
         return self.expression(
             exp.With(
+                hint=hint,
                 expressions=expressions,
                 recursive=recursive or None,
                 search=search,
@@ -4641,6 +4647,29 @@ class Parser:
             )
         )
 
+    def _parse_match_recognize_pattern(self) -> exp.Var:
+        self._match_l_paren()
+
+        if not self._curr:
+            self.raise_error("Expecting )", self._curr)
+
+        paren = 1
+        start = self._curr
+
+        while self._curr and paren > 0:
+            if self._curr.token_type == TokenType.L_PAREN:
+                paren += 1
+            if self._curr.token_type == TokenType.R_PAREN:
+                paren -= 1
+
+            end = self._prev
+            self._advance()
+
+        if paren > 0:
+            self.raise_error("Expecting )", self._curr)
+
+        return exp.var(self._find_sql(start, end))
+
     def _parse_match_recognize(self) -> exp.MatchRecognize | None:
         if not self._match(TokenType.MATCH_RECOGNIZE):
             return None
@@ -4688,30 +4717,7 @@ class Parser:
         else:
             after = None
 
-        if self._match_text_seq("PATTERN"):
-            self._match_l_paren()
-
-            if not self._curr:
-                self.raise_error("Expecting )", self._curr)
-
-            paren = 1
-            start = self._curr
-
-            while self._curr and paren > 0:
-                if self._curr.token_type == TokenType.L_PAREN:
-                    paren += 1
-                if self._curr.token_type == TokenType.R_PAREN:
-                    paren -= 1
-
-                end = self._prev
-                self._advance()
-
-            if paren > 0:
-                self.raise_error("Expecting )", self._curr)
-
-            pattern = exp.var(self._find_sql(start, end))
-        else:
-            pattern = None
+        pattern = self._parse_match_recognize_pattern() if self._match_text_seq("PATTERN") else None
 
         define = (
             self._parse_csv(self._parse_name_as_expression)
@@ -6287,7 +6293,9 @@ class Parser:
                 or (klass is not exp.Is and isinstance(this, exp.Is))
             ):
                 this = exp.Paren(this=this)
-            if isinstance(expression, (exp.Predicate, exp.Connector, exp.Not, exp.Escape)):
+            if isinstance(
+                expression, (exp.Predicate, exp.Connector, exp.Not, exp.Escape)
+            ) and not isinstance(expression, exp.SubqueryPredicate):
                 expression = exp.Paren(this=expression)
         else:
             if isinstance(this.this if isinstance(this, exp.Not) else this, is_predicates):
@@ -6727,7 +6735,8 @@ class Parser:
 
             if isinstance(this, exp.Literal):
                 literal = this.name
-                this = self._parse_column_ops(this)
+                if self.TYPED_LITERAL_BINDS_COLUMN_OPS:
+                    this = self._parse_column_ops(this)
 
                 if self.ZONE_AWARE_TIMESTAMP_CONSTRUCTOR and TIME_ZONE_RE.search(literal):
                     if data_type.is_type(exp.DType.TIMESTAMP):
@@ -6736,10 +6745,14 @@ class Parser:
                         data_type = exp.DType.TIMETZ.into_expr()
 
                 parser = self.TYPE_LITERAL_PARSERS.get(data_type.this)
-                if parser:
-                    return parser(self, this, data_type)
-
-                return self.expression(exp.Cast(this=this, to=data_type))
+                typed = (
+                    parser(self, this, data_type)
+                    if parser
+                    else self.expression(exp.Cast(this=this, to=data_type))
+                )
+                return (
+                    typed if self.TYPED_LITERAL_BINDS_COLUMN_OPS else self._parse_column_ops(typed)
+                )
 
             # The expressions arg gets set by the parser when we have something like DECIMAL(38, 0)
             # in the input SQL. In that case, we'll produce these tokens: DECIMAL ( 38 , 0 )
